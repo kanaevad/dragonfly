@@ -50,7 +50,7 @@ def _make_sidekiq_job(i: int) -> str:
     sidekiq/lib/sidekiq/job_util.rb (normalize_item).
     """
     jid = uuid.uuid4().hex[:24]  # SecureRandom.hex(12)
-    now_ms = int(time.time() * 1000)  # Process.clock_gettime(CLOCK_REALTIME, :millisecond)
+    now = time.time()  # Time.now.to_f
     return json.dumps(
         {
             "class": "ProcessJobWorker",
@@ -61,8 +61,8 @@ def _make_sidekiq_job(i: int) -> str:
             "retry": True,
             "queue": "default",
             "jid": jid,
-            "created_at": now_ms,
-            "enqueued_at": now_ms,
+            "created_at": now,
+            "enqueued_at": now,
         }
     )
 
