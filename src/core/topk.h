@@ -210,7 +210,7 @@ class TOPK {
 
   // Check if an item is in the Top-K heap
   [[nodiscard]] bool IsInHeap(std::string_view item) const {
-    return item_to_hash_.contains(std::string(item));
+    return item_to_hash_.contains(item);
   }
 
   // Hashes the item for a specific row and calculates its flattened 1D index

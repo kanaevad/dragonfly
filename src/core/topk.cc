@@ -286,7 +286,6 @@ std::vector<TOPK::TopKItem> TOPK::List() const {
   std::vector<TopKItem> result;
   result.reserve(min_heap_.size());
 
-  // Copy heap items
   for (const auto& heap_item : min_heap_) {
     result.push_back({heap_item.key, heap_item.count});
   }
@@ -299,51 +298,54 @@ std::vector<TOPK::TopKItem> TOPK::List() const {
 }
 
 std::optional<std::string> TOPK::UpdateHeap(std::string_view item, uint32_t new_count) {
-  std::string item_str(item);
-  size_t item_hash = XXH3_64bits(item.data(), item.size());
-
-  // First check if item is in top-k using O(1) hash lookup
-  auto it = item_to_hash_.find(item_str);
+  // Fast path: O(1) hash lookup for membership, followed by a cache-friendly
+  // O(K) linear scan and O(log K) heap update.
+  auto it = item_to_hash_.find(item);
   if (it != item_to_hash_.end()) {
-    // Item is in top-k, find its position in heap with O(k) linear search
-    // This is acceptable since we only do it for items we KNOW are in the heap
+    size_t cached_hash = it->second;
     for (size_t i = 0; i < min_heap_.size(); ++i) {
-      if (min_heap_[i].key == item_str) {
-        // Update count and restore heap property with O(log k) heapify
+      if ((min_heap_[i].hash == cached_hash) && (min_heap_[i].key == item)) {
         uint32_t old_count = min_heap_[i].count;
         min_heap_[i].count = new_count;
-
-        // Restore heap property based on count change
         if (new_count > old_count) {
-          HeapifyDown(i);  // MIN-HEAP: count increased -> item is LARGER -> needs to sink DOWN
+          HeapifyDown(i);
         } else if (new_count < old_count) {
-          HeapifyUp(i);  // MIN-HEAP: count decreased -> item is SMALLER -> needs to bubble UP
+          HeapifyUp(i);
         }
-        // If counts equal, no heapify needed
         return std::nullopt;
       }
     }
+    LOG(DFATAL) << "TopK invariant broken: item found in map but missing from heap!";
+    // Production: self-heal the corruption so the item can be cleanly re-inserted below.
+    item_to_hash_.erase(it);
   }
 
-  // Item not in heap - add if heap not full or count > min
+  // Fast reject: item doesn't qualify for the heap. Just exit without any memory allocations or
+  // modifications.
+  if ((min_heap_.size() >= k_) && (new_count <= min_heap_.front().count)) {
+    return std::nullopt;
+  }
+
+  // Slow path: item will enter the heap. Now allocate.
+  std::string item_str(item);
+  size_t item_hash = XXH3_64bits(item.data(), item.size());
+
   if (min_heap_.size() < k_) {
-    // Heap not full, add directly
+    // Heap not full, add the item, no eviction needed
     size_t new_idx = min_heap_.size();
     min_heap_.push_back({item_str, new_count, item_hash});
     item_to_hash_[item_str] = item_hash;
-    HeapifyUp(new_idx);  // Restore heap property
+    HeapifyUp(new_idx);
     return std::nullopt;
-  } else if (new_count > min_heap_.front().count) {
-    // Count is higher than minimum in heap, evict minimum
-    std::string old_key = min_heap_[0].key;
-    item_to_hash_.erase(old_key);
-
-    min_heap_[0] = {item_str, new_count, item_hash};
-    item_to_hash_[item_str] = item_hash;
-    HeapifyDown(0);  // Restore heap property from root
-    return old_key;
   }
-  return std::nullopt;
+
+  // Heap is full, evict minimum and add new item
+  std::string old_key = std::move(min_heap_[0].key);
+  item_to_hash_.erase(old_key);
+  min_heap_[0] = {item_str, new_count, item_hash};
+  item_to_hash_[item_str] = item_hash;
+  HeapifyDown(0);
+  return old_key;
 }
 
 std::optional<std::string> TOPK::TryEvictMin() {
