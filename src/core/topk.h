@@ -48,11 +48,11 @@ namespace dfly {
 //
 class TOPK {
  public:
-  // Create a Top-K sketch with specified parameters.
-  // k: number of top items to track
-  // width: number of counters per row (hash table buckets)
-  // depth: number of rows (hash functions)
-  // decay: probability decay constant for exponential decay (0.0-1.0)
+  // Initializes a Top-K tracking sketch with the specified dimensions.
+  // k: Maximum number of most frequent items to maintain in the min-heap.
+  // width: Number of counter buckets per row in the hash grid.
+  // depth: Number of independent hash functions (rows) used.
+  // decay: Probability multiplier for exponential decay (must be 0.0 to 1.0).
   TOPK(uint32_t k, uint32_t width, uint32_t depth, double decay,
        PMR_NS::memory_resource* mr = nullptr);
 
@@ -71,20 +71,20 @@ class TOPK {
   };
 
   // Add an item to the sketch.
-  // Returns the expelled item if one was removed from Top-K, or empty vector.
-  std::vector<std::string> Add(std::string_view item);
+  // Returns the evicted item if one was removed from Top-K, or std::nullopt.
+  std::optional<std::string> Add(std::string_view item);
 
   // Add multiple items to the sketch.
-  // Returns a vector where each element is either an expelled item or empty string.
+  // Returns a vector where each element is either an evicted item or std::nullopt.
   std::vector<std::optional<std::string>> AddMultiple(const std::vector<std::string_view>& items);
 
   // Increment an item's count by the specified amount.
-  // Returns the expelled item if one was removed, or empty vector.
+  // Returns the evicted item if one was removed, or std::nullopt.
   // increment must be > 0.
-  std::vector<std::string> IncrBy(std::string_view item, uint32_t increment);
+  std::optional<std::string> IncrBy(std::string_view item, uint32_t increment);
 
   // Increment multiple items by specified amounts.
-  // Returns a vector where each element is either an expelled item or empty string.
+  // Returns a vector where each element is either an evicted item or std::nullopt.
   std::vector<std::optional<std::string>> IncrByMultiple(
       const std::vector<std::pair<std::string_view, uint32_t>>& items);
 
@@ -157,15 +157,15 @@ class TOPK {
   // one. Otherwise, returns std::nullopt.
   std::optional<std::string> UpdateHeap(std::string_view item, uint32_t new_count);
 
-  // Try to expel the minimum item from heap if it's full
-  // Returns the expelled item or empty string
-  std::string TryExpelMin();
+  // Tries to evict the item with the minimum count (lowest frequency) from the heap
+  // if capacity (k_) is reached. Returns the evicted item's key, or std::nullopt.
+  std::optional<std::string> TryEvictMin();
 
   // Check if an item is in the Top-K heap
   [[nodiscard]] bool IsInHeap(std::string_view item) const;
 
   // Shared increment logic
-  std::vector<std::string> IncrementInternal(std::string_view item, uint32_t increment);
+  std::optional<std::string> IncrementInternal(std::string_view item, uint32_t increment);
 
   // Compute decay probability using lookup table or extrapolation
   double ComputeDecayProbability(uint32_t count) const;
@@ -180,8 +180,9 @@ class TOPK {
   uint32_t depth_;  // Hash table depth (number of rows)
   double decay_;    // Decay constant (0.0-1.0, typically 0.9)
 
-  // Pre-calculated decay lookup table
-  static constexpr size_t kDecayLookupSize = 256;
+  // Pre-calculated decay lookup table (32KB per instance — covers decay^4095 which
+  // is negligible for any practical decay value, avoiding std::pow on the hot path).
+  static constexpr size_t kDecayLookupSize = 4096;
   std::array<double, kDecayLookupSize> decay_lookup_{};
 
   // HeavyKeeper data structures
@@ -191,7 +192,12 @@ class TOPK {
   // Min heap: vector of top-K items maintained as a min heap
   std::vector<HeapItem, PMR_NS::polymorphic_allocator<HeapItem>> min_heap_;
 
-  // Fast lookup: item name -> hash for O(1) "is in top-k" queries
+  // O(1) fast-path membership index for the min-heap.
+  // Maps items currently in the Top-K list to their pre-computed 64-bit hashes.
+  // This serves two critical performance goals:
+  // 1. Prevents O(K) linear scans just to check if an item is currently in the heap.
+  // 2. Caches the hash to allow very fast integer comparisons instead of
+  //    slow string comparisons when locating the item inside the heap array.
   absl::flat_hash_map<std::string, size_t> item_to_hash_;
 };
 

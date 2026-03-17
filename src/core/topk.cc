@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <utility>
 
 #include "base/logging.h"
 
@@ -27,7 +28,7 @@ TOPK::TOPK(const uint32_t k, const uint32_t width, const uint32_t depth, const d
   DCHECK_GT(depth_, 0u);
   DCHECK_GE(decay_, 0.0);
   DCHECK_LE(decay_, 1.0);
-  min_heap_.reserve(k + 1);
+  min_heap_.reserve(k_);
 
   // Pre-compute decay lookup table for i = 0 to 255 to avoid repeated std::pow() calls
   for (size_t i = 0; i < kDecayLookupSize; ++i) {
@@ -36,11 +37,11 @@ TOPK::TOPK(const uint32_t k, const uint32_t width, const uint32_t depth, const d
 }
 
 TOPK::TOPK(TOPK&& other) noexcept
-    : k_(other.k_),
-      width_(other.width_),
-      depth_(other.depth_),
-      decay_(other.decay_),
-      decay_lookup_(other.decay_lookup_),
+    : k_(std::exchange(other.k_, 0)),
+      width_(std::exchange(other.width_, 0)),
+      depth_(std::exchange(other.depth_, 0)),
+      decay_(std::exchange(other.decay_, 0.0)),
+      decay_lookup_(std::move(other.decay_lookup_)),
       counters_(std::move(other.counters_)),
       min_heap_(std::move(other.min_heap_)),
       item_to_hash_(std::move(other.item_to_hash_)) {
@@ -48,11 +49,11 @@ TOPK::TOPK(TOPK&& other) noexcept
 
 TOPK& TOPK::operator=(TOPK&& other) noexcept {
   if (this != &other) {
-    k_ = other.k_;
-    width_ = other.width_;
-    depth_ = other.depth_;
-    decay_ = other.decay_;
-    decay_lookup_ = other.decay_lookup_;
+    k_ = std::exchange(other.k_, 0);
+    width_ = std::exchange(other.width_, 0);
+    depth_ = std::exchange(other.depth_, 0);
+    decay_ = std::exchange(other.decay_, 0.0);
+    decay_lookup_ = std::move(other.decay_lookup_);
     counters_ = std::move(other.counters_);
     min_heap_ = std::move(other.min_heap_);
     item_to_hash_ = std::move(other.item_to_hash_);
@@ -61,25 +62,32 @@ TOPK& TOPK::operator=(TOPK&& other) noexcept {
 }
 
 uint64_t TOPK::Hash(std::string_view item, uint32_t row) const {
-  return XXH3_64bits_withSeed(item.data(), item.size(), row) % width_;
+  auto full_hash = XXH3_64bits_withSeed(item.data(), item.size(), row);
+
+  // Lemire's Fast Range Reduction avoids the expensive CPU integer division penalty of the modulo
+  // (%) operator. The main principle: multiplication is much faster than division, so we multiply
+  // a 32-bit slice of the hash by the width, and then shift right by 32 bits to get the bucket
+  // index. See: https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/
+  uint32_t hash32 = static_cast<uint32_t>(full_hash);
+  return (static_cast<uint64_t>(hash32) * width_) >> 32;
 }
 
 double TOPK::ComputeDecayProbability(uint32_t count) const {
   if (count < kDecayLookupSize) {
-    // Direct lookup for small counts
     return decay_lookup_[count];
   }
 
-  // When decay is not in table range [0..N] use extrapolation:
-  // decay^count ≈ (decay^(N-1))^(count/(N-1)) × decay^(count%(N-1))
+  // If the last table entry is already negligible, extrapolating further is pointless.
+  if (decay_lookup_[kDecayLookupSize - 1] < 1e-9) {
+    return 0.0;
+  }
+
+  // Extrapolation for decay values very close to 1.0:
+  // decay^count = (decay^(N-1))^(count/(N-1)) * decay^(count%(N-1))
   uint32_t quotient = count / (kDecayLookupSize - 1);
   uint32_t remainder = count % (kDecayLookupSize - 1);
-
-  // Compute (decay^(N-1))^quotient × decay^remainder
   double base = decay_lookup_[kDecayLookupSize - 1];
-  double result = std::pow(base, static_cast<double>(quotient)) * decay_lookup_[remainder];
-
-  return result;
+  return std::pow(base, static_cast<double>(quotient)) * decay_lookup_[remainder];
 }
 
 bool TOPK::ShouldDecay(uint32_t current_count) const {
@@ -155,9 +163,7 @@ bool TOPK::IsInHeap(std::string_view item) const {
   return item_to_hash_.contains(std::string(item));
 }
 
-std::vector<std::string> TOPK::IncrementInternal(std::string_view item, uint32_t increment) {
-  std::vector<std::string> expelled;
-
+std::optional<std::string> TOPK::IncrementInternal(std::string_view item, uint32_t increment) {
   // Update counters using HeavyKeeper logic
   for (uint32_t row = 0; row < depth_; ++row) {
     uint64_t bucket = Hash(item, row);
@@ -174,16 +180,10 @@ std::vector<std::string> TOPK::IncrementInternal(std::string_view item, uint32_t
   // Get the minimum count across all hash functions
   uint32_t min_count = GetMinCount(item);
 
-  // Update heap and catch any evicted item
-  std::optional<std::string> evicted = UpdateHeap(item, min_count);
-  if (evicted.has_value()) {
-    expelled.push_back(std::move(evicted.value()));
-  }
-
-  return expelled;
+  return UpdateHeap(item, min_count);
 }
 
-std::vector<std::string> TOPK::Add(std::string_view item) {
+std::optional<std::string> TOPK::Add(std::string_view item) {
   return IncrementInternal(item, 1);
 }
 
@@ -193,21 +193,15 @@ std::vector<std::optional<std::string>> TOPK::AddMultiple(
   result.reserve(items.size());
 
   for (const auto& item : items) {
-    auto expelled = Add(item);
-    if (expelled.empty()) {
-      result.emplace_back(std::nullopt);
-    } else {
-      result.emplace_back(expelled[0]);
-    }
+    result.push_back(Add(item));
   }
 
   return result;
 }
 
-std::vector<std::string> TOPK::IncrBy(std::string_view item, uint32_t increment) {
+std::optional<std::string> TOPK::IncrBy(std::string_view item, uint32_t increment) {
   if (increment < 1) {
-    // Invalid increment, return empty
-    return {};
+    return std::nullopt;
   }
   return IncrementInternal(item, increment);
 }
@@ -218,12 +212,7 @@ std::vector<std::optional<std::string>> TOPK::IncrByMultiple(
   result.reserve(items.size());
 
   for (const auto& [item, incr] : items) {
-    auto expelled = IncrBy(item, incr);
-    if (expelled.empty()) {
-      result.emplace_back(std::nullopt);
-    } else {
-      result.emplace_back(expelled[0]);
-    }
+    result.push_back(IncrBy(item, incr));
   }
 
   return result;
@@ -303,7 +292,7 @@ std::optional<std::string> TOPK::UpdateHeap(std::string_view item, uint32_t new_
     HeapifyUp(new_idx);  // Restore heap property
     return std::nullopt;
   } else if (new_count > min_heap_.front().count) {
-    // Count is higher than minimum in heap, replace minimum
+    // Count is higher than minimum in heap, evict minimum
     std::string old_key = min_heap_[0].key;
     item_to_hash_.erase(old_key);
 
@@ -315,9 +304,9 @@ std::optional<std::string> TOPK::UpdateHeap(std::string_view item, uint32_t new_
   return std::nullopt;
 }
 
-std::string TOPK::TryExpelMin() {
+std::optional<std::string> TOPK::TryEvictMin() {
   if (min_heap_.empty() || min_heap_.size() <= k_) {
-    return "";
+    return std::nullopt;
   }
 
   // Remove minimum item (at root)

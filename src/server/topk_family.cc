@@ -56,12 +56,7 @@ OpResult<vector<optional<string>>> OpAdd(const OpArgs& op_args, string_view key,
   result.reserve(items.size());
 
   for (const auto& item : items) {
-    auto expelled = topk->Add(item);
-    if (expelled.empty()) {
-      result.push_back(nullopt);
-    } else {
-      result.push_back(expelled[0]);
-    }
+    result.push_back(topk->Add(item));
   }
 
   return result;
@@ -79,12 +74,7 @@ OpResult<vector<optional<string>>> OpIncrBy(const OpArgs& op_args, string_view k
   result.reserve(items.size());
 
   for (const auto& [item, incr] : items) {
-    auto expelled = topk->IncrBy(item, incr);
-    if (expelled.empty()) {
-      result.emplace_back(nullopt);
-    } else {
-      result.emplace_back(expelled[0]);
-    }
+    result.push_back(topk->IncrBy(item, incr));
   }
 
   return result;
@@ -231,9 +221,9 @@ void TopkFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
   {
     SinkReplyBuilder::ReplyScope scope(rb);
     rb->StartArray(result->size());
-    for (const auto& expelled : *result) {
-      if (expelled.has_value()) {
-        rb->SendBulkString(*expelled);
+    for (const auto& evicted : *result) {
+      if (evicted.has_value()) {
+        rb->SendBulkString(*evicted);
       } else {
         rb->SendNull();
       }
@@ -284,9 +274,9 @@ void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   {
     SinkReplyBuilder::ReplyScope scope(rb);
     rb->StartArray(result->size());
-    for (const auto& expelled : *result) {
-      if (expelled.has_value()) {
-        rb->SendBulkString(*expelled);
+    for (const auto& evicted : *result) {
+      if (evicted.has_value()) {
+        rb->SendBulkString(*evicted);
       } else {
         rb->SendNull();
       }
