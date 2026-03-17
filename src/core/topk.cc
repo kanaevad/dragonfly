@@ -10,6 +10,7 @@
 #include <cmath>
 #include <utility>
 
+#include "absl/random/distributions.h"
 #include "base/logging.h"
 #include "base/random.h"
 
@@ -136,8 +137,10 @@ bool TOPK::ShouldDecay(uint32_t current_count) const {
 }
 
 void TOPK::HeapifyUp(size_t index) {
-  // Restore min-heap property upward from index
-  // Used when an item's count increases
+  // Restores the min-heap property by shifting the element at 'index' upward.
+  // Triggered in two cases:
+  // 1. Initial insertion: A new item is appended to the array and needs to bubble up.
+  // 2. Count decrease: An existing item's count drops (becomes smaller), floating higher.
   while (index > 0) {
     size_t parent = (index - 1) / 2;
     if (min_heap_[parent].count <= min_heap_[index].count) {
@@ -146,25 +149,26 @@ void TOPK::HeapifyUp(size_t index) {
 
     // Swap with parent
     std::swap(min_heap_[parent], min_heap_[index]);
-
     index = parent;
   }
 }
 
 void TOPK::HeapifyDown(size_t index) {
-  // Restore min-heap property downward from index
-  // Used when an item's count decreases or after removal
+  // Restores the min-heap property by shifting the element at 'index' downward.
+  // Triggered in two cases:
+  // 1. Root replacement/removal: The minimum item is evicted/replaced and the new root must sink.
+  // 2. Count increase: An existing item's count grows (becomes heavier), sinking lower.
   size_t size = min_heap_.size();
 
   while (true) {
-    size_t left = 2 * index + 1;
-    size_t right = 2 * index + 2;
+    size_t left = (2 * index) + 1;
+    size_t right = (2 * index) + 2;
     size_t smallest = index;
 
-    if (left < size && min_heap_[left].count < min_heap_[smallest].count) {
+    if ((left < size) && (min_heap_[left].count) < (min_heap_[smallest].count)) {
       smallest = left;
     }
-    if (right < size && min_heap_[right].count < min_heap_[smallest].count) {
+    if ((right < size) && (min_heap_[right].count) < (min_heap_[smallest].count)) {
       smallest = right;
     }
 
@@ -174,42 +178,48 @@ void TOPK::HeapifyDown(size_t index) {
 
     // Swap with smallest child
     std::swap(min_heap_[smallest], min_heap_[index]);
-
     index = smallest;
   }
+}
+
+size_t TOPK::GetCounterIndex(std::string_view item, uint32_t row) const {
+  // Note:
+  // - bucket is mathematically guaranteed to be in the range [0, width_ - 1]
+  // - The max possible idx is depth * width - 1, which is within the bounds of our counters_
+  // vector
+  uint64_t bucket = Hash(item, row);
+  return static_cast<size_t>(row) * width_ + bucket;
 }
 
 uint32_t TOPK::GetMinCount(std::string_view item) const {
   uint32_t min_count = std::numeric_limits<uint32_t>::max();
 
   for (uint32_t row = 0; row < depth_; ++row) {
-    uint64_t bucket = Hash(item, row);
-    size_t idx = static_cast<size_t>(row) * width_ + bucket;
+    size_t idx = GetCounterIndex(item, row);
     min_count = std::min(min_count, counters_[idx]);
   }
 
   return min_count;
 }
 
-bool TOPK::IsInHeap(std::string_view item) const {
-  return item_to_hash_.contains(std::string(item));
-}
-
 std::optional<std::string> TOPK::IncrementInternal(std::string_view item, uint32_t increment) {
   // Update counters using HeavyKeeper logic
   for (uint32_t row = 0; row < depth_; ++row) {
-    uint64_t bucket = Hash(item, row);
-    size_t idx = static_cast<size_t>(row) * width_ + bucket;
+    size_t idx = GetCounterIndex(item, row);
 
-    // Apply exponential decay with probability for existing counts
-    if (counters_[idx] > 0 && ShouldDecay(counters_[idx])) {
-      counters_[idx] = std::max(1u, counters_[idx] - 1);
+    // HeavyKeeper: decay and increment are mutually exclusive.
+    // - With probability decay^count, the counter is decremented (colliding items suppress each
+    // other).
+    // - Otherwise, the counter is incremented for the item being added.
+    if ((counters_[idx] > 0) && ShouldDecay(counters_[idx])) {
+      --counters_[idx];
+    } else {
+      counters_[idx] = std::min(counters_[idx] + increment, std::numeric_limits<uint32_t>::max());
     }
-    // Increment by specified amount
-    counters_[idx] = std::min(counters_[idx] + increment, std::numeric_limits<uint32_t>::max());
   }
 
-  // Get the minimum count across all hash functions
+  // Count-Min Sketch property: The minimum counter across all rows is the
+  // most accurate, as it has suffered the fewest hash collisions.
   uint32_t min_count = GetMinCount(item);
 
   return UpdateHeap(item, min_count);

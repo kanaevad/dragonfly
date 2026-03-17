@@ -168,7 +168,14 @@ class TOPK {
   std::optional<std::string> TryEvictMin();
 
   // Check if an item is in the Top-K heap
-  [[nodiscard]] bool IsInHeap(std::string_view item) const;
+  [[nodiscard]] bool IsInHeap(std::string_view item) const {
+    return item_to_hash_.contains(std::string(item));
+  }
+
+  // Hashes the item for a specific row and calculates its flattened 1D index
+  // within the counters_ array. Maps the 2D Count-Min Sketch grid (depth x width)
+  // into a single contiguous block of memory for better CPU cache locality.
+  size_t GetCounterIndex(std::string_view item, uint32_t row) const;
 
   // Shared increment logic
   std::optional<std::string> IncrementInternal(std::string_view item, uint32_t increment);
