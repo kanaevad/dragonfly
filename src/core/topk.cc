@@ -349,17 +349,18 @@ std::optional<std::string> TOPK::UpdateHeap(std::string_view item, uint32_t new_
 }
 
 std::optional<std::string> TOPK::TryEvictMin() {
-  if (min_heap_.empty() || min_heap_.size() <= k_) {
+  if (min_heap_.empty() || (min_heap_.size() <= k_)) {
     return std::nullopt;
   }
 
   // Remove minimum item (at root)
-  std::string min_key = min_heap_[0].key;
+  std::string min_key = std::move(min_heap_[0].key);
+  DCHECK(item_to_hash_.contains(min_key));
   item_to_hash_.erase(min_key);
 
   // Move last item to root and heapify down
   if (min_heap_.size() > 1) {
-    min_heap_[0] = min_heap_.back();
+    min_heap_[0] = std::move(min_heap_.back());
   }
   min_heap_.pop_back();
 
@@ -374,6 +375,11 @@ std::optional<std::string> TOPK::TryEvictMin() {
 size_t TOPK::MallocUsed() const {
   size_t size = 0;
 
+  // Custom decay table (only for non-default decay values)
+  if (custom_decay_table_) {
+    size += sizeof(std::array<double, kDecayLookupSize>);
+  }
+
   // Counter array
   size += counters_.capacity() * sizeof(uint32_t);
 
@@ -384,9 +390,8 @@ size_t TOPK::MallocUsed() const {
   }
 
   // flat_hash_map overhead
-  size += item_to_hash_.bucket_count();  // Account for control bytes
-  size +=
-      item_to_hash_.bucket_count() * sizeof(std::pair<const std::string, size_t>);  // Pair storage
+  size += item_to_hash_.bucket_count();
+  size += item_to_hash_.bucket_count() * sizeof(std::pair<const std::string, size_t>);
   for (const auto& [key, hash] : item_to_hash_) {
     size += key.capacity();
   }
@@ -402,6 +407,7 @@ TOPK::SerializedData TOPK::Serialize() const {
   data.decay = decay_;
 
   // Serialize heap items
+  data.heap_items.reserve(min_heap_.size());
   for (const auto& heap_item : min_heap_) {
     data.heap_items.push_back({heap_item.key, heap_item.count});
   }
@@ -421,6 +427,8 @@ void TOPK::Deserialize(const SerializedData& data) {
   counters_.assign(data.counters.begin(), data.counters.end());
 
   // Restore heap
+  min_heap_.reserve(data.heap_items.size());
+  item_to_hash_.reserve(data.heap_items.size());
   for (const auto& item : data.heap_items) {
     size_t item_hash = XXH3_64bits(item.item.data(), item.item.size());
     min_heap_.push_back({item.item, item.count, item_hash});
