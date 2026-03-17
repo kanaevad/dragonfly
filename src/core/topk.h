@@ -76,56 +76,93 @@ class TOPK {
     uint32_t count;
   };
 
-  // Add an item to the sketch.
-  // Returns the evicted item if one was removed from Top-K, or std::nullopt.
+  // Inserts a single item into the Top-K sketch, incrementing its estimated frequency by 1.
+  //
+  // Returns: The string of the evicted item if this insertion caused a resident
+  //          item to be displaced from the Top-K min-heap, or std::nullopt
+  //          if no eviction occurred.
   std::optional<std::string> Add(std::string_view item);
 
-  // Add multiple items to the sketch.
-  // Returns a vector where each element is either an evicted item or std::nullopt.
+  // Batch equivalent of Add().
+  //
+  // Input: A vector of items to insert into the sketch.
+  // Returns: A vector of results mapping 1:1 to the input items. Each element
+  //          contains either the evicted item resulting from that specific
+  //          insertion, or std::nullopt.
   std::vector<std::optional<std::string>> AddMultiple(const std::vector<std::string_view>& items);
 
-  // Increment an item's count by the specified amount.
-  // Returns the evicted item if one was removed, or std::nullopt.
-  // increment must be > 0.
+  // Increments an item's estimated frequency by a specific, arbitrary amount.
+  //
+  // Precondition: 'increment' must be strictly greater than 0.
+  // Returns: The string of the evicted item if this operation caused a resident
+  //          item to be displaced from the Top-K min-heap, or std::nullopt.
   std::optional<std::string> IncrBy(std::string_view item, uint32_t increment);
 
-  // Increment multiple items by specified amounts.
-  // Returns a vector where each element is either an evicted item or std::nullopt.
+  // Batch equivalent of IncrBy().
+  //
+  // Input: A vector of pairs containing the item and its respective increment amount.
+  // Returns: A vector of results mapping 1:1 to the input pairs. Each element
+  //          contains either the evicted item resulting from that specific
+  //          increment, or std::nullopt.
   std::vector<std::optional<std::string>> IncrByMultiple(
       const std::vector<std::pair<std::string_view, uint32_t>>& items);
 
-  // Query if items are in the Top-K list.
-  // Returns 1 if item is in Top-K, 0 otherwise.
+  // Queries whether a batch of items currently resides in the Top-K min-heap.
+  //
+  // Input: A vector of strings (items) to check against the Top-K list.
+  // Output: A vector of integers mapping 1:1 to the input vector.
+  //         The i-th element of the output will be 1 if items[i] is
+  //         currently a Top-K high-frequency item, and 0 otherwise.
   [[nodiscard]] std::vector<int> Query(const std::vector<std::string_view>& items) const;
 
-  // Get estimated counts for items.
+  // Estimates the frequency count for a batch of items using the underlying sketch.
+  //
+  // Input: A vector of strings (items) to query.
+  // Output: A vector of unsigned integers mapping 1:1 to the input vector,
+  //         representing the lowest uncorrupted counter value for each item.
   [[nodiscard]] std::vector<uint32_t> Count(const std::vector<std::string_view>& items) const;
 
-  // Get the Top-K items list, optionally with counts.
-  // Items are sorted by estimated frequency (highest first).
+  // Retrieves the complete list of current Top-K high-frequency items.
+  //
+  // Returns: A vector of TopKItem structures (containing the key and its count),
+  //          sorted in descending order by estimated frequency (highest first).
   [[nodiscard]] std::vector<TopKItem> List() const;
 
-  // Accessors for Top-K parameters
+  // --------------------------------------------------------------------------
+  // Accessors for Top-K Configuration Parameters
+  // --------------------------------------------------------------------------
+
+  // Returns the maximum capacity (K) of the Top-K min-heap.
   [[nodiscard]] uint32_t K() const {
     return k_;
   }
 
+  // Returns the width (number of columns/buckets) of the Count-Min Sketch array.
   [[nodiscard]] uint32_t Width() const {
     return width_;
   }
 
+  // Returns the depth (number of rows/hash functions) of the Count-Min Sketch array.
   [[nodiscard]] uint32_t Depth() const {
     return depth_;
   }
 
+  // Returns the exponential decay probability base used by the HeavyKeeper algorithm.
   [[nodiscard]] double Decay() const {
     return decay_;
   }
 
-  // Memory usage in bytes
+  // Calculates the total heap memory dynamically allocated by this Top-K instance,
+  // including sketch counters, min-heap allocations, and hash map overhead.
+  //
+  // Returns: Total memory usage in bytes.
   [[nodiscard]] size_t MallocUsed() const;
 
-  // Serialization support for RDB persistence
+  // --------------------------------------------------------------------------
+  // Serialization and Persistence
+  // --------------------------------------------------------------------------
+
+  // Pod-like structure to hold the exact internal state of the Top-K instance.
   struct SerializedData {
     uint32_t k;
     uint32_t width;
@@ -134,7 +171,11 @@ class TOPK {
     std::vector<TopKItem> heap_items;
     std::vector<uint32_t> counters;
   };
+
+  // Extracts the current structural state of the sketch for RDB persistence.
   [[nodiscard]] SerializedData Serialize() const;
+
+  // Reconstructs the internal state of the sketch from a previously serialized dataset.
   void Deserialize(const SerializedData& data);
 
  private:
