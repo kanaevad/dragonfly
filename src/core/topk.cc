@@ -8,10 +8,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <random>
 #include <utility>
 
 #include "base/logging.h"
+#include "base/random.h"
 
 namespace dfly {
 
@@ -130,12 +130,9 @@ bool TOPK::ShouldDecay(uint32_t current_count) const {
     return false;
 
   // Exponential decay probability: decay^count
-  // Use thread-local random generator for thread safety
-  thread_local std::mt19937 gen(std::random_device{}());
-  thread_local std::uniform_real_distribution<double> dis(0.0, 1.0);
-
+  thread_local base::Xoroshiro128p bitgen;
   double prob = ComputeDecayProbability(current_count);
-  return dis(gen) < prob;
+  return absl::Uniform(bitgen, 0.0, 1.0) < prob;
 }
 
 void TOPK::HeapifyUp(size_t index) {
