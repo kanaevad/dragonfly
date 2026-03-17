@@ -28,7 +28,6 @@ namespace {
 // Default TOPK parameters
 constexpr uint32_t kDefaultWidth = 8;
 constexpr uint32_t kDefaultDepth = 7;
-constexpr double kDefaultDecay = 0.9;
 
 OpStatus OpReserve(const OpArgs& op_args, string_view key, uint32_t k, uint32_t width,
                    uint32_t depth, double decay) {
@@ -151,7 +150,7 @@ void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
   // Optional parameters
   uint32_t width = kDefaultWidth;
   uint32_t depth = kDefaultDepth;
-  double decay = kDefaultDecay;
+  double decay = TOPK::kDefaultDecay;
 
   if (parser.HasNext()) {
     width = parser.Next<uint32_t>();

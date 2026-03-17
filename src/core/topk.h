@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <queue>
 #include <string>
@@ -55,14 +56,19 @@ class TOPK {
   // decay: Probability multiplier for exponential decay (must be 0.0 to 1.0).
   TOPK(uint32_t k, uint32_t width, uint32_t depth, double decay,
        PMR_NS::memory_resource* mr = nullptr);
-
   TOPK(const TOPK&) = delete;
   TOPK& operator=(const TOPK&) = delete;
-
   TOPK(TOPK&& other) noexcept;
   TOPK& operator=(TOPK&& other) noexcept;
-
   ~TOPK() = default;
+
+  // Size is 4097 so that (kDecayLookupSize - 1) equals exactly 4096 (2^12).
+  // This allows the C++ compiler to optimize the division and modulo operations
+  // in the extrapolation hot-path into very-fast bitwise shifts & ANDs.
+  static constexpr size_t kDecayLookupSize = 4097;
+
+  static constexpr double kDefaultDecay = 0.9;
+  static constexpr double kDecayEpsilon = 1e-9;
 
   // Represents an item in the Top-K list with its estimated count
   struct TopKItem {
@@ -180,10 +186,17 @@ class TOPK {
   uint32_t depth_;  // Hash table depth (number of rows)
   double decay_;    // Decay constant (0.0-1.0, typically 0.9)
 
-  // Pre-calculated decay lookup table (32KB per instance — covers decay^4095 which
-  // is negligible for any practical decay value, avoiding std::pow on the hot path).
-  static constexpr size_t kDecayLookupSize = 4096;
-  std::array<double, kDecayLookupSize> decay_lookup_{};
+  // Pointer to the active decay lookup table. For the default decay (0.9), this points to
+  // a process-wide shared static table (32KB, allocated once). For custom (non-default) decay
+  // values, it points to custom_decay_table_ below. This pattern can help to avoid embedding a 32KB
+  // array in every TOPK object.
+  // Assumption: >99% of TOPK instances will use the default decay, so
+  // this optimization can significantly reduce memory usage and improve startup performance by
+  // avoiding the need to build a custom table for each instance.
+  const std::array<double, kDecayLookupSize>* decay_lookup_ = nullptr;
+
+  // Heap-allocated table for non-default decay values. Null for the common case (decay=0.9).
+  std::unique_ptr<std::array<double, kDecayLookupSize>> custom_decay_table_;
 
   // HeavyKeeper data structures
   // Hash table: width × depth matrix of counters

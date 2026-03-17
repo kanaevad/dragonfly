@@ -15,6 +15,21 @@
 
 namespace dfly {
 
+namespace {
+
+const std::array<double, TOPK::kDecayLookupSize>& GetDefaultDecayTable() {
+  static const auto table = [] {
+    std::array<double, TOPK::kDecayLookupSize> t{};
+    for (size_t i = 0; i < TOPK::kDecayLookupSize; ++i) {
+      t[i] = std::pow(TOPK::kDefaultDecay, static_cast<double>(i));
+    }
+    return t;
+  }();
+  return table;
+}
+
+}  // namespace
+
 TOPK::TOPK(const uint32_t k, const uint32_t width, const uint32_t depth, const double decay,
            PMR_NS::memory_resource* mr)
     : k_(k),
@@ -30,9 +45,16 @@ TOPK::TOPK(const uint32_t k, const uint32_t width, const uint32_t depth, const d
   DCHECK_LE(decay_, 1.0);
   min_heap_.reserve(k_);
 
-  // Pre-compute decay lookup table for i = 0 to 255 to avoid repeated std::pow() calls
-  for (size_t i = 0; i < kDecayLookupSize; ++i) {
-    decay_lookup_[i] = std::pow(decay_, static_cast<double>(i));
+  if (std::abs(decay_ - TOPK::kDefaultDecay) < TOPK::kDecayEpsilon) {
+    // default decay value: use shared static table to save memory and initialization time
+    decay_lookup_ = &GetDefaultDecayTable();
+  } else {
+    // custom decay value: build a dedicated table for this instance
+    custom_decay_table_ = std::make_unique<std::array<double, TOPK::kDecayLookupSize>>();
+    for (size_t i = 0; i < TOPK::kDecayLookupSize; ++i) {
+      (*custom_decay_table_)[i] = std::pow(decay_, static_cast<double>(i));
+    }
+    decay_lookup_ = custom_decay_table_.get();
   }
 }
 
@@ -41,7 +63,8 @@ TOPK::TOPK(TOPK&& other) noexcept
       width_(std::exchange(other.width_, 0)),
       depth_(std::exchange(other.depth_, 0)),
       decay_(std::exchange(other.decay_, 0.0)),
-      decay_lookup_(std::move(other.decay_lookup_)),
+      decay_lookup_(std::exchange(other.decay_lookup_, nullptr)),
+      custom_decay_table_(std::move(other.custom_decay_table_)),
       counters_(std::move(other.counters_)),
       min_heap_(std::move(other.min_heap_)),
       item_to_hash_(std::move(other.item_to_hash_)) {
@@ -53,7 +76,8 @@ TOPK& TOPK::operator=(TOPK&& other) noexcept {
     width_ = std::exchange(other.width_, 0);
     depth_ = std::exchange(other.depth_, 0);
     decay_ = std::exchange(other.decay_, 0.0);
-    decay_lookup_ = std::move(other.decay_lookup_);
+    decay_lookup_ = std::exchange(other.decay_lookup_, nullptr);
+    custom_decay_table_ = std::move(other.custom_decay_table_);
     counters_ = std::move(other.counters_);
     min_heap_ = std::move(other.min_heap_);
     item_to_hash_ = std::move(other.item_to_hash_);
@@ -73,21 +97,32 @@ uint64_t TOPK::Hash(std::string_view item, uint32_t row) const {
 }
 
 double TOPK::ComputeDecayProbability(uint32_t count) const {
+  DCHECK(decay_lookup_);
+  const auto& table = *decay_lookup_;
   if (count < kDecayLookupSize) {
-    return decay_lookup_[count];
+    return table[count];
   }
 
-  // If the last table entry is already negligible, extrapolating further is pointless.
-  if (decay_lookup_[kDecayLookupSize - 1] < 1e-9) {
+  // If the probability is already less than kDecayEpsilon, the chance of decay is
+  // statistically zero (see ShouldDecay). Skip the expensive std::pow extrapolation entirely.
+  if (table[TOPK::kDecayLookupSize - 1] < TOPK::kDecayEpsilon) {
     return 0.0;
   }
 
-  // Extrapolation for decay values very close to 1.0:
-  // decay^count = (decay^(N-1))^(count/(N-1)) * decay^(count%(N-1))
-  uint32_t quotient = count / (kDecayLookupSize - 1);
-  uint32_t remainder = count % (kDecayLookupSize - 1);
-  double base = decay_lookup_[kDecayLookupSize - 1];
-  return std::pow(base, static_cast<double>(quotient)) * decay_lookup_[remainder];
+  // Extrapolate probabilities for counts that exceed our lookup table's max index.
+  // Let M = the maximum table index (kDecayLookupSize - 1)
+  // Let Q = the quotient (count / M)
+  // Let R = the remainder (count % M)
+  //
+  // Using the Laws of Exponents, we break down decay^count:
+  // decay^count = decay^((Q * M) + R) = (decay^M)^Q * decay^R
+  //
+  // This translates directly to reusing our cached table:
+  // std::pow(table[M], Q) * table[R]
+  uint32_t quotient = count / (TOPK::kDecayLookupSize - 1);
+  uint32_t remainder = count % (TOPK::kDecayLookupSize - 1);
+  double base = table[TOPK::kDecayLookupSize - 1];
+  return std::pow(base, static_cast<double>(quotient)) * table[remainder];
 }
 
 bool TOPK::ShouldDecay(uint32_t current_count) const {
