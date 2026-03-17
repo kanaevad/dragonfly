@@ -16,8 +16,36 @@
 
 namespace dfly {
 
-/// Top-K implementation using the HeavyKeeper algorithm.
-/// Compatible with Redis TOPK commands from RedisBloom module.
+//
+// TOPK: User-Facing API Data Structure
+//
+// This class implements the data structure required to support the public Redis
+// TOPK module API (e.g., TOPK.RESERVE, TOPK.ADD, TOPK.INCRBY).
+//
+// WHY WE HAVE TWO TOP-K IMPLEMENTATIONS:
+// Dragonfly maintains two separate Top-K tracking structures to protect the
+// performance of the database's hot path:
+// 1. `TopKeys` (src/core/top_keys.h): An internal-only, hyper-optimized O(1)
+//    tracker that runs on every single database command to detect hot keys.
+//    It intentionally lacks a min-heap and uses standard memory allocation to
+//    maximize raw speed and minimize instruction cache pollution.
+// 2. `TOPK` (this file): The user-facing implementation. To comply with the Redis
+//    API contract, this class MUST support instant eviction reporting (requiring an
+//    O(log K) Min-Heap), arbitrary increments, and PMR allocators for strict
+//    memory limit tracking and RDB snapshot serialization.
+//
+// Forcing the internal tracker to support Min-Heaps and PMR would severely
+// degrade overall database throughput, hence the strict separation of concerns.
+//
+// Algorithm Deviation Note:
+// While heavily inspired by the HeavyKeeper algorithm, this is NOT a strict
+// implementation. The original HeavyKeeper paper requires storing a
+// (fingerprint, count) pair in each cell so that decay only penalizes a specific
+// item. This implementation uses a bare `uint32_t` counter grid, making it closer
+// to a Count-Min Sketch coupled with a Min-Heap and a decay heuristic. This
+// design safely overestimates counts (which is acceptable for Top-K bounds)
+// while simplifying PMR memory layout and RDB serialization.
+//
 class TOPK {
  public:
   // Create a Top-K sketch with specified parameters.
@@ -124,8 +152,10 @@ class TOPK {
   // Get the minimum count for an item across all hash table rows
   [[nodiscard]] uint32_t GetMinCount(std::string_view item) const;
 
-  // Update the min heap after count changes
-  void UpdateHeap(std::string_view item, uint32_t new_count);
+  // Updates the min-heap with the new count for the given item.
+  // Returns the evicted item's key if the heap is at capacity and a new item displaces an existing
+  // one. Otherwise, returns std::nullopt.
+  std::optional<std::string> UpdateHeap(std::string_view item, uint32_t new_count);
 
   // Try to expel the minimum item from heap if it's full
   // Returns the expelled item or empty string

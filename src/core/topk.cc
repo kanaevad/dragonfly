@@ -1,4 +1,4 @@
-// Copyright 2025, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -166,24 +166,18 @@ std::vector<std::string> TOPK::IncrementInternal(std::string_view item, uint32_t
     // Apply exponential decay with probability for existing counts
     if (counters_[idx] > 0 && ShouldDecay(counters_[idx])) {
       counters_[idx] = std::max(1u, counters_[idx] - 1);
-    } else {
-      // Increment by specified amount
-      counters_[idx] = std::min(counters_[idx] + increment, std::numeric_limits<uint32_t>::max());
     }
+    // Increment by specified amount
+    counters_[idx] = std::min(counters_[idx] + increment, std::numeric_limits<uint32_t>::max());
   }
 
   // Get the minimum count across all hash functions
   uint32_t min_count = GetMinCount(item);
 
-  // Update heap
-  UpdateHeap(item, min_count);
-
-  // Check if we need to expel an item
-  if (min_heap_.size() > k_) {
-    std::string expelled_item = TryExpelMin();
-    if (!expelled_item.empty()) {
-      expelled.push_back(std::move(expelled_item));
-    }
+  // Update heap and catch any evicted item
+  std::optional<std::string> evicted = UpdateHeap(item, min_count);
+  if (evicted.has_value()) {
+    expelled.push_back(std::move(evicted.value()));
   }
 
   return expelled;
@@ -273,7 +267,7 @@ std::vector<TOPK::TopKItem> TOPK::List() const {
   return result;
 }
 
-void TOPK::UpdateHeap(std::string_view item, uint32_t new_count) {
+std::optional<std::string> TOPK::UpdateHeap(std::string_view item, uint32_t new_count) {
   std::string item_str(item);
   size_t item_hash = XXH3_64bits(item.data(), item.size());
 
@@ -290,12 +284,12 @@ void TOPK::UpdateHeap(std::string_view item, uint32_t new_count) {
 
         // Restore heap property based on count change
         if (new_count > old_count) {
-          HeapifyUp(i);  // Count increased, may need to move up
+          HeapifyDown(i);  // MIN-HEAP: count increased -> item is LARGER -> needs to sink DOWN
         } else if (new_count < old_count) {
-          HeapifyDown(i);  // Count decreased, may need to move down
+          HeapifyUp(i);  // MIN-HEAP: count decreased -> item is SMALLER -> needs to bubble UP
         }
         // If counts equal, no heapify needed
-        return;
+        return std::nullopt;
       }
     }
   }
@@ -307,6 +301,7 @@ void TOPK::UpdateHeap(std::string_view item, uint32_t new_count) {
     min_heap_.push_back({item_str, new_count, item_hash});
     item_to_hash_[item_str] = item_hash;
     HeapifyUp(new_idx);  // Restore heap property
+    return std::nullopt;
   } else if (new_count > min_heap_.front().count) {
     // Count is higher than minimum in heap, replace minimum
     std::string old_key = min_heap_[0].key;
@@ -315,7 +310,9 @@ void TOPK::UpdateHeap(std::string_view item, uint32_t new_count) {
     min_heap_[0] = {item_str, new_count, item_hash};
     item_to_hash_[item_str] = item_hash;
     HeapifyDown(0);  // Restore heap property from root
+    return old_key;
   }
+  return std::nullopt;
 }
 
 std::string TOPK::TryExpelMin() {
