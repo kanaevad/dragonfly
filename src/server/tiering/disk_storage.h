@@ -45,10 +45,11 @@ class DiskStorage {
   // Allocate segment of at least given length and prepare buffer. Might block to grow backing file.
   // Return error if not enough space is available or growing failed.
   // Every successful preparation must end in a Stash(), otherwise resources are leaked.
-  io::Result<std::pair<size_t /* offset */, util::fb2::UringBuf>> PrepareStash(size_t length);
+  io::Result<std::pair<size_t /* offset */, util::fb2::RegisteredSlice>> PrepareStash(
+      size_t length);
 
   // Write prepared buffer to given segment and resolve completion callback when write is done.
-  void Stash(DiskSegment segment, util::fb2::UringBuf buf, StashCb cb);
+  void Stash(DiskSegment segment, util::fb2::RegisteredSlice buf, StashCb cb);
 
   Stats GetStats() const;
 
@@ -57,7 +58,7 @@ class DiskStorage {
   std::error_code RequestGrow(off_t grow_size);
 
   // Returns a buffer with size greater or equal to len.
-  util::fb2::UringBuf PrepareBuf(size_t len);
+  util::fb2::RegisteredSlice PrepareBuf(size_t len);
 
   off_t max_size_;
   size_t pending_ops_ = 0;  // number of ongoing ops for safe shutdown
